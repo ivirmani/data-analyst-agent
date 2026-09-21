@@ -13,3 +13,7 @@ charts/
 # Generated reports
 report.html
 .report_draft.json
+
+# Generated workbooks
+analysis.xlsx
+.excel_draft.json

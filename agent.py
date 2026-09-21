@@ -10,6 +10,7 @@ from dotenv import load_dotenv
 from google import genai
 from google.genai import errors, types
 
+import excel
 import report
 from tools import run_python
 
@@ -20,7 +21,7 @@ MODEL = "gemini-3.1-flash-lite"
 # characters. Flash-Lite starts dropping instructions and mis-stating numbers
 # at that size, so reports use a full Flash model instead. Fewer free requests
 # per day, but a report is an occasional thing.
-REPORT_MODEL = "gemini-3.6-flash"
+REPORT_MODEL = "gemini-3.5-flash"
 
 # Hard ceiling on how many trips to the API the agent may make for one question.
 MAX_STEPS = 8
@@ -266,6 +267,45 @@ several directions and record each thing you find as you go.
 """
 
 
+EXCEL_RULES = """Excel workbooks:
+Your deliverable is a FILE, not an answer. The job is finished when
+excel.build() has run and analysis.xlsx exists on disk. Printing the numbers
+into your reply is not finishing. Do not write a summary of the data in text.
+
+Produce tables a person can work with, not a dump of the raw rows.
+
+- The excel module is already available. Record a table like this:
+
+    import excel
+    excel.add_table(
+        "Revenue by region",
+        table_df,
+        note="Total revenue for 2024, summed across every product and month.",
+        chart="bar",
+        labels="Region",
+        values="Total revenue",
+    )
+
+  chart, labels and values are optional. Use chart="bar" to compare categories
+  and chart="line" for anything measured over time.
+- Record 2 to 4 tables. Each one becomes its own sheet.
+- Aggregate first. A sheet holding 144 raw rows is not useful; a sheet holding
+  four regional totals is.
+- Rename columns to readable labels before passing the table: "Total revenue",
+  not "revenue". labels and values must match the names AFTER renaming.
+- Leave numbers as NUMBERS. Do not turn them into strings like "$650,708" -
+  that would stop the recipient using them in formulas. The workbook applies
+  the display formatting itself.
+- When every table is recorded, build the workbook in a final call:
+
+    import excel
+    excel.build()
+
+- Then reply in plain text: a sentence on what the workbook contains, and the
+  path analysis.xlsx.
+"""
+
+
 COMPARE_RULES = """Comparing files:
 You have been given more than one file. The user wants to know what CHANGED
 between them, not what each one contains. Two sets of totals side by side is
@@ -303,15 +343,23 @@ DATA_SECTION = """Here are the files you can read:
 """
 
 
-def build_system_prompt(csv_paths, report_mode=False):
+def build_system_prompt(csv_paths, mode="chat"):
     paths = as_list(csv_paths)
     """Fill the CSV path and summary into the system prompt template."""
     # Only include the rules that apply. Report rules are long, and a small
     # model handles a short prompt better than a long one, so an ordinary
     # question never has to carry them.
-    sections = [BASE_RULES, CHART_RULES]
-    if report_mode:
+    sections = [BASE_RULES]
+
+    # Excel charts are native spreadsheet objects, so the matplotlib rules are
+    # not just useless there, they compete with the rules that matter.
+    if mode != "excel":
+        sections.append(CHART_RULES)
+
+    if mode == "report":
         sections.append(REPORT_RULES)
+    if mode == "excel":
+        sections.append(EXCEL_RULES)
     if len(paths) > 1:
         sections.append(COMPARE_RULES)
     sections.append(DATA_SECTION)
@@ -391,6 +439,12 @@ def call_model(client, conversation, config, model):
         except errors.APIError as error:
             is_last_attempt = attempt == MAX_ATTEMPTS
 
+            # A 429 usually means "slow down", and backing off fixes it. But a
+            # 429 for the DAILY quota will still be there in eight seconds, so
+            # retrying just wastes time before delivering the same bad news.
+            if error.code == 429 and "PerDay" in str(error):
+                raise
+
             # A permanent error (bad key, bad request) will never fix itself,
             # so re-raise it immediately instead of waiting around.
             if error.code not in RETRYABLE_CODES or is_last_attempt:
@@ -410,19 +464,21 @@ class Chat:
     is what lets a follow-up question refer back to an earlier one.
     """
 
-    def __init__(self, csv_paths="sales.csv", report_mode=False):
+    def __init__(self, csv_paths="sales.csv", mode="chat"):
         self.csv_paths = as_list(csv_paths)
-        self.report_mode = report_mode
+        self.mode = mode
 
-        # Reports take many more steps than a single question does.
-        self.max_steps = REPORT_MAX_STEPS if report_mode else MAX_STEPS
+        # Building a document takes many more steps than one question does,
+        # and is a harder job, so it also gets the stronger model.
+        building = mode in ("report", "excel")
+        self.max_steps = REPORT_MAX_STEPS if building else MAX_STEPS
+        self.model = REPORT_MODEL if building else MODEL
 
-        # A report is a much harder job, so it gets a stronger model.
-        self.model = REPORT_MODEL if report_mode else MODEL
-
-        # Throw away findings left over from any earlier report.
-        if report_mode:
+        # Throw away anything left over from an earlier run.
+        if mode == "report":
             report.clear()
+        if mode == "excel":
+            excel.clear()
 
         # Create the charts folder if it is not there yet. exist_ok means
         # "do nothing if it already exists" rather than raising an error.
@@ -433,7 +489,7 @@ class Chat:
         )
 
         self.config = types.GenerateContentConfig(
-            system_instruction=build_system_prompt(self.csv_paths, report_mode),
+            system_instruction=build_system_prompt(self.csv_paths, mode),
             tools=[RUN_PYTHON_TOOL],
             # Turn OFF the SDK's automatic tool running. We drive the loop ourselves.
             automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
@@ -518,9 +574,9 @@ class Chat:
         )
 
 
-def ask(question, csv_paths="sales.csv", report_mode=False):
+def ask(question, csv_paths="sales.csv", mode="chat"):
     """Answer a single question with no history. Behaves exactly as before."""
-    return Chat(csv_paths, report_mode).ask(question)
+    return Chat(csv_paths, mode).ask(question)
 
 
 def indent(text):
@@ -605,9 +661,15 @@ if __name__ == "__main__":
             arguments.remove(flag)
             set_verbose(True)
 
-    report_mode = "--report" in arguments
-    if report_mode:
-        arguments.remove("--report")
+    # --report and --excel are two ways of asking for a document, so they
+    # are one setting rather than two flags that could both be on.
+    mode = "chat"
+    for flag, flag_mode in (("--report", "report"), ("--excel", "excel")):
+        if flag in arguments:
+            if mode != "chat":
+                raise SystemExit("Use either --report or --excel, not both.")
+            mode = flag_mode
+            arguments.remove(flag)
 
     # --compare is followed by the two files to compare.
     csv_paths = "sales.csv"
@@ -630,13 +692,13 @@ if __name__ == "__main__":
     # Catch the predictable failures and turn them into one clear sentence,
     # instead of dumping a traceback on the user.
     try:
-        if report_mode and not arguments:
-            raise SystemExit('--report needs a question, for example:\n'
-                             '  python agent.py --report "How did 2024 go?"')
+        if mode != "chat" and not arguments:
+            raise SystemExit(f'--{mode} needs a question, for example:\n'
+                             f'  python agent.py --{mode} "How did 2024 go?"')
 
         if arguments:
             # A question was passed on the command line: answer it and exit.
-            print_answer(ask(arguments[0], csv_paths, report_mode))
+            print_answer(ask(arguments[0], csv_paths, mode))
         else:
             # No question given: start an ongoing conversation instead.
             chat_loop(csv_paths)
@@ -651,6 +713,14 @@ if __name__ == "__main__":
             "The servers are probably busy. Try again in a minute."
         )
     except errors.APIError as error:
+        if error.code == 429 and "PerDay" in str(error):
+            raise SystemExit(
+                f"Daily free quota used up for this model.\n"
+                f"Reports and spreadsheets use {REPORT_MODEL}, which has a much\n"
+                f"smaller free allowance than {MODEL}.\n"
+                "Either wait for the quota to reset (midnight Pacific), or edit\n"
+                "REPORT_MODEL at the top of agent.py to another Flash model."
+            )
         raise SystemExit(
             f"Gemini API error {error.code}: {error.message}\n"
             "If this is 429 or 503, wait a minute and try again."

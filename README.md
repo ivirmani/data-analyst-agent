@@ -5,7 +5,8 @@ runs it, reads the output, fixes its own mistakes, and answers with real numbers
 
 It also draws charts that point at the finding, rather than leaving you to
 spot it, can write a whole report as a single self-contained HTML file, and can
-tell you what changed between two files.
+tell you what changed between two files. Output comes as HTML or as an Excel
+workbook with live charts.
 
 ```
 $ python agent.py "Which region grew fastest from January to December?"
@@ -241,6 +242,34 @@ Combine it with `--report` for a comparison report:
 python agent.py --compare sales.csv sales_2025.csv --report "What changed?"
 ```
 
+### Excel workbooks
+
+`--excel` produces `analysis.xlsx` instead of an answer: two to four sheets,
+each an aggregated table with a note, a formatted header, and a **native Excel
+chart**.
+
+```bash
+python agent.py --excel "Break down 2024 revenue by region and by product, and show the monthly trend"
+```
+
+Native matters. What lands in the workbook is a real chart object, not a
+picture of one - click it, re-point it at other cells, restyle it, and it
+behaves like a chart you drew yourself. Change a number in the table and the
+chart moves.
+
+Numbers stay numbers. The agent is told **not** to format them as strings like
+`"$650,708"`, because that would stop the recipient using them in formulas -
+the workbook applies display formatting instead, so a share column shows as
+`50.4%` while the cell still holds `0.504`. That is the opposite of the rule
+for HTML reports, where a formatted string is exactly what you want. Same
+data, different deliverable, opposite rule.
+
+The matplotlib chart rules are deliberately not loaded in this mode. They are
+about saving PNGs, which has nothing to do with a spreadsheet, and leaving
+them in made the agent worse - it kept answering in text instead of building
+the file. Dropping them cut the prompt from 6,457 to 3,290 characters and
+fixed the behaviour.
+
 ## Things it can do
 
 - **Aggregate**: totals, averages, counts, grouped any way you like
@@ -252,6 +281,7 @@ python agent.py --compare sales.csv sales_2025.csv --report "What changed?"
   one broad question
 - **Compare**: what changed between two files - reversals, things added or
   discontinued, and by how much
+- **Export**: an Excel workbook with aggregated sheets and live, editable charts
 - **Follow up**: "what about the East?" works, in chat mode
 - **Recover**: if its code crashes, it reads the error and tries again
 - **Refuse**: if the data cannot answer your question, it says so instead of
@@ -288,6 +318,7 @@ Nothing in the prompt or the tool is specific to sales data.
 | `agent.py` | The system prompt, tool definition, agent loop, and chat mode |
 | `tools.py` | Runs generated code in a subprocess with a timeout |
 | `report.py` | Collects findings, then renders them into one HTML file |
+| `excel.py` | Collects tables, then writes them into one Excel workbook |
 | `make_data.py` | Generates both sample CSVs |
 | `hello_gemini.py` | Minimal API call, to check your key works |
 | `sales.csv` | Sample data: 144 rows of fake regional sales for 2024 |
@@ -300,7 +331,7 @@ The knobs are constants at the top of `agent.py`:
 | Setting | Default | Meaning |
 |---|---|---|
 | `MODEL` | `gemini-3.1-flash-lite` | Model for ordinary questions |
-| `REPORT_MODEL` | `gemini-3.6-flash` | Model for `--report`, which needs a stronger one |
+| `REPORT_MODEL` | `gemini-3.5-flash` | Model for `--report` and `--excel`, which need a stronger one |
 | `MAX_STEPS` | `8` | Most API calls allowed per question |
 | `REPORT_MAX_STEPS` | `22` | The same limit in `--report` mode, which needs far more |
 | `MAX_ATTEMPTS` | `4` | Retries on a temporary API failure |
@@ -329,9 +360,16 @@ passes 9,000 characters. At that size Flash-Lite began dropping the report
 procedure entirely and mis-stating figures - claiming a region went from -46%
 to +39% when the real values were -26% and +74%. Making the rules more
 emphatic made it worse, which is the signal that the problem is the volume of
-instructions rather than their wording. Reports use a full Flash model
-instead. Ordinary questions stay on Flash-Lite, which has a far larger free
-daily allowance and handles them perfectly well.
+instructions rather than their wording. Reports and workbooks use a full Flash
+model instead. Ordinary questions stay on Flash-Lite, which has a far larger
+free daily allowance and handles them perfectly well.
+
+The trade is real. Full Flash models have a small free daily quota, and an
+afternoon of testing reports will exhaust it. When that happens you get a
+clear message rather than a retry loop, because a daily quota will still be
+exhausted eight seconds later - unlike a 429 that means "slow down", which
+backing off does fix. Either wait for the reset at midnight Pacific, or point
+`REPORT_MODEL` at another Flash model.
 
 ## Limitations
 
