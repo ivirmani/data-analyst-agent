@@ -8,30 +8,38 @@ It can also draw charts.
 ```
 $ python agent.py "Which region grew fastest from January to December?"
 
-[15:18:02] Question: Which region grew fastest from January to December?
-[15:18:02] --- Step 1 of 8: asking the model ---
-[15:18:04] Tool call: run_python
+Analyzing..
+The South region grew the fastest, at approximately 117.25%.
+```
+
+By default you get the answer and nothing else. Add `-v` to watch it work -
+every piece of code it writes, and what that code printed:
+
+```
+$ python agent.py -v "What is the total revenue?"
+
+[15:52:41] Question: What is the total revenue?
+[15:52:41] --- Step 1 of 8: asking the model ---
+[15:52:44] Tool call: run_python
     | import pandas as pd
     | df = pd.read_csv("sales.csv")
-    | jan = df[df['month'] == '2024-01'].groupby('region')['revenue'].sum()
-    | dec = df[df['month'] == '2024-12'].groupby('region')['revenue'].sum()
-    | print(((dec - jan) / jan * 100).sort_values(ascending=False))
-[15:18:04] Tool result (took 0.2s):
-    | region
-    | South    117.252378
-    | East      35.609284
-    | North      9.135312
-    | West     -25.590471
+    | print(df['revenue'].sum())
+[15:52:44] Tool result (took 0.2s):
+    | 2145803.62
+[15:52:46] Model says: The total revenue is 2,145,803.62.
 
 ============================================================
-The South region grew the fastest, at approximately 117.25%.
+The total revenue across all regions, products, and months is 2,145,803.62.
 ============================================================
 ```
+
+`-v` is worth using whenever an answer looks surprising. The agent sometimes
+takes a wrong turn and corrects itself, and the only way to know is to look.
 
 ## How it works
 
 The agent never guesses a number. It can only learn about your data by running
-code, and you see every line it runs.
+code, and with `-v` you can see every line it runs.
 
 1. We send Gemini a **summary** of the CSV - column names, data types, and the
    first 5 rows. Never the whole file.
@@ -99,6 +107,8 @@ You should get a one sentence answer back from Gemini.
 python agent.py "What is the total revenue for each product?"
 ```
 
+Add `-v` (or `--verbose`) to see every step instead of just the answer.
+
 ### Chat mode
 
 Run it with no arguments for an ongoing conversation, where follow-up
@@ -124,6 +134,7 @@ Commands inside chat mode:
 | Command | What it does |
 |---|---|
 | `reset` | Forget the conversation and start a fresh topic |
+| `verbose` | Toggle step-by-step output on and off |
 | `quit` | Leave |
 | `Ctrl+C` | Abandon the current question, stay in chat |
 

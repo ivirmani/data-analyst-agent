@@ -20,6 +20,10 @@ MAX_STEPS = 8
 # Where the agent saves any charts it draws.
 CHART_DIR = "charts"
 
+# When False (the default) we print only the final answer.
+# When True we print every step: the code, the output, the timings.
+VERBOSE = False
+
 # How many times we retry a failed API call before giving up.
 MAX_ATTEMPTS = 4
 
@@ -35,9 +39,24 @@ REQUEST_TIMEOUT_MS = 60_000  # 60 seconds
 RETRYABLE_CODES = {408, 429, 500, 502, 503, 504}
 
 
+def set_verbose(on):
+    """Turn step-by-step output on or off."""
+    # "global" means: change the VERBOSE defined at the top of the file,
+    # rather than making a new local variable that vanishes.
+    global VERBOSE
+    VERBOSE = on
+
+
 def log(message):
-    """Print a timestamped line, so we can watch what the agent is doing."""
-    print(f"[{time.strftime('%H:%M:%S')}] {message}")
+    """Print a timestamped line - but only when the user asked to see steps."""
+    if VERBOSE:
+        print(f"[{time.strftime('%H:%M:%S')}] {message}")
+
+
+def progress(mark):
+    """In quiet mode, show a dot per step so it does not look frozen."""
+    if not VERBOSE:
+        print(mark, end="", flush=True)
 
 
 def summarize_csv(csv_path):
@@ -219,9 +238,11 @@ class Chat:
         )
 
         log(f"Question: {question}")
+        progress("Analyzing")
 
         for step in range(1, MAX_STEPS + 1):
             log(f"--- Step {step} of {MAX_STEPS}: asking the model ---")
+            progress(".")
 
             response = call_model(self.client, self.conversation, self.config)
 
@@ -239,6 +260,7 @@ class Chat:
             # No tool call means the model is giving its final answer.
             if call is None:
                 log("No tool call. This is the final answer.")
+                progress("\n")
                 # Keep the answer in the history, so a follow-up question can
                 # refer back to what was just said.
                 self.conversation.append(reply)
@@ -249,12 +271,14 @@ class Chat:
 
             code = call.args.get("code", "")
             log(f"Tool call: {call.name}")
-            print(indent(code))
+            if VERBOSE:
+                print(indent(code))
 
             started = time.time()
             result = run_python(code)
             log(f"Tool result (took {time.time() - started:.1f}s):")
-            print(indent(result))
+            if VERBOSE:
+                print(indent(result))
 
             # Send the result back, labelled as the answer to that tool call.
             self.conversation.append(
@@ -270,6 +294,7 @@ class Chat:
             )
 
         log("Step limit reached.")
+        progress("\n")
         return (
             f"Stopped after {MAX_STEPS} steps without reaching an answer. "
             "Try asking a simpler or more specific question."
@@ -287,11 +312,15 @@ def indent(text):
 
 
 def print_answer(answer):
-    """Show a final answer in a way that stands out from the log lines."""
-    print()
-    print("=" * 60)
-    print(answer)
-    print("=" * 60)
+    """Show the final answer. In verbose mode it needs a banner to stand out
+    from all the log lines. In quiet mode the answer is all there is."""
+    if VERBOSE:
+        print()
+        print("=" * 60)
+        print(answer)
+        print("=" * 60)
+    else:
+        print(answer)
 
 
 def chat_loop(csv_path="sales.csv"):
@@ -301,7 +330,7 @@ def chat_loop(csv_path="sales.csv"):
     print()
     print(f"Chat mode. Ask about {csv_path}, or type 'quit' to leave.")
     print("Follow-up questions work - the agent remembers what you asked before.")
-    print("Type 'reset' to forget the conversation and start a fresh topic.")
+    print("Type 'reset' to start a fresh topic, or 'verbose' to see the steps.")
 
     while True:
         try:
@@ -322,6 +351,12 @@ def chat_loop(csv_path="sales.csv"):
         # Emptying the list wipes the memory. The client, the config and the
         # system prompt are untouched, so the next question starts clean but
         # still knows all about the CSV.
+        # Let the user switch step-by-step output on and off mid-conversation.
+        if question.lower() in ("verbose", "steps"):
+            set_verbose(not VERBOSE)
+            print("Showing every step." if VERBOSE else "Showing answers only.")
+            continue
+
         if question.lower() in ("reset", "new", "clear"):
             cleared = len(chat.conversation)
             chat.conversation.clear()
@@ -346,12 +381,19 @@ if __name__ == "__main__":
     if not os.environ.get("GEMINI_API_KEY"):
         raise SystemExit("GEMINI_API_KEY not found. Check that .env exists in this folder.")
 
+    # Pull any -v / --verbose flag out, leaving just the question behind.
+    arguments = sys.argv[1:]
+    for flag in ("-v", "--verbose"):
+        if flag in arguments:
+            arguments.remove(flag)
+            set_verbose(True)
+
     # Catch the predictable failures and turn them into one clear sentence,
     # instead of dumping a traceback on the user.
     try:
-        if len(sys.argv) >= 2:
-            # One question passed on the command line: answer it and exit.
-            print_answer(ask(sys.argv[1]))
+        if arguments:
+            # A question was passed on the command line: answer it and exit.
+            print_answer(ask(arguments[0]))
         else:
             # No question given: start an ongoing conversation instead.
             chat_loop()
