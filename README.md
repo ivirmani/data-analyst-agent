@@ -57,7 +57,7 @@ is explicitly disabled, so nothing is hidden.
 ## Setup
 
 ```bash
-git clone <your-repo-url>
+git clone https://github.com/ivirmani/data-analyst-agent.git
 cd data-analyst-agent
 ```
 
