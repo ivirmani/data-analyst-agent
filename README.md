@@ -3,7 +3,8 @@
 Ask questions about a CSV file in plain English. The agent writes pandas code,
 runs it, reads the output, fixes its own mistakes, and answers with real numbers.
 
-It can also draw charts.
+It also draws charts that point at the finding, rather than leaving you to
+spot it.
 
 ```
 $ python agent.py "Which region grew fastest from January to December?"
@@ -140,7 +141,13 @@ Commands inside chat mode:
 
 ### Charts
 
-Ask for one and it saves a PNG into `charts/`:
+Ask for one and it saves a PNG into `charts/`. The charts are annotated: the
+title states the finding rather than describing the axes, the series being
+discussed is highlighted while the rest fade to grey, and an arrow points at
+the thing being claimed.
+
+Every number printed on a chart is computed from the data in the same snippet
+that draws it - never written by the model from memory.
 
 ```bash
 python agent.py "Draw a line chart of monthly revenue for each region"

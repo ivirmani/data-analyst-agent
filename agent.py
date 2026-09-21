@@ -107,7 +107,59 @@ Charts:
     plt.savefig("{chart_dir}/revenue_by_region.png")
 - Never call plt.show(). There is no screen. Saving the file is the whole job.
 - Call plt.close() after saving, so the next chart starts from a blank page.
-- Give the chart a title and axis labels.
+- Give the chart axis labels.
+- Drawing a chart ALWAYS takes two run_python calls, never one:
+    Call 1: print the numbers that will go into the chart. Do not draw anything.
+    Call 2: look at those numbers, decide what they show, then draw.
+  Do not skip call 1, even when the chart seems obvious.
+- NEVER type a number into a title or a label by hand. Every number shown on
+  a chart must be built with an f-string from a variable you just computed in
+  the same snippet. Typing "revenue reached 50,676" from memory is how charts
+  end up lying. Do this instead:
+
+    first = totals.iloc[0]
+    last = totals.iloc[-1]
+    change = (last - first) / first * 100
+    direction = "rose" if change > 0 else "fell"
+    title = f"West revenue {direction} {abs(change):.0f}% over the year"
+
+- Work out the direction from the numbers too, the same way. Do not describe a
+  series as rising or recovering until you have checked the sign of the change.
+- The title is the finding you saw in call 1, written as a sentence, not a
+  description of the axes.
+  Good: "South overtakes West in December"
+  Bad:  "Revenue by Region"
+- Then point at that finding on the picture, with exactly ONE annotation.
+  The label must be a takeaway with a number in it, not a name for a point.
+  It must also say something the title does NOT already say. If the title is
+  "Widget earns the most at $1,071,431", the label should add context, such as
+  "68% more than Gadget", never repeat the same sentence.
+  Good: "Fell 26% from its February peak"
+  Bad:  "West peak revenue"
+  Point xy at whatever part of the data the TITLE is about. If the title is
+  about a decline, point at the end of the decline, not at the peak.
+  Work xy out from the real data, never guess it.
+  Place the text using axes fraction coordinates, keeping y between 0.1 and
+  0.7, so the label can never collide with the title. Keep the arrow SHORT:
+  put the text near the point it points at, not on the other side of the
+  chart. A long arrow crossing the whole picture is worse than no arrow.
+
+    plt.margins(y=0.15)          # leave some empty space around the data
+    plt.annotate(
+        "Fell 26% from its February peak",
+        xy=(11, 45817),                          # a real data point
+        xytext=(0.45, 0.35), textcoords="axes fraction",
+        arrowprops=dict(arrowstyle="->", color="black"),
+        fontsize=9,
+        bbox=dict(boxstyle="round,pad=0.3", facecolor="white", edgecolor="grey"),
+    )
+
+- Make the finding stand out. Whatever the title is about keeps a strong colour
+  and a thick line. Everything else is light grey and thin, so the eye lands in
+  the right place. Keep every series in the legend:
+
+    plt.plot(x, west,  color="crimson",   linewidth=2.5, zorder=3, label="West")
+    plt.plot(x, north, color="lightgrey", linewidth=1.2, zorder=1, label="North")
 - After saving, print the file path, then mention that path in your final answer.
 
 Here is a summary of the file you are analyzing:
@@ -118,11 +170,15 @@ Here is a summary of the file you are analyzing:
 
 def build_system_prompt(csv_path):
     """Fill the CSV path and summary into the system prompt template."""
-    return SYSTEM_PROMPT.format(
-        csv_path=csv_path,
-        summary=summarize_csv(csv_path),
-        chart_dir=CHART_DIR,
-    )
+    # We fill the placeholders with .replace() rather than .format(), because
+    # the prompt now contains example code with { } braces in it, and .format()
+    # would try to treat those as placeholders too.
+    # The summary goes in last, so that braces inside the data are left alone.
+    prompt = SYSTEM_PROMPT
+    prompt = prompt.replace("{csv_path}", csv_path)
+    prompt = prompt.replace("{chart_dir}", CHART_DIR)
+    prompt = prompt.replace("{summary}", summarize_csv(csv_path))
+    return prompt
 
 
 # The tool definition: how we describe run_python to Gemini.
