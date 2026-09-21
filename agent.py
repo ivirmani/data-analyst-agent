@@ -13,7 +13,14 @@ from google.genai import errors, types
 import report
 from tools import run_python
 
+# The everyday model: cheap, fast, and plenty for one question at a time.
 MODEL = "gemini-3.1-flash-lite"
+
+# Reports load three sets of rules at once, and the prompt passes 9,000
+# characters. Flash-Lite starts dropping instructions and mis-stating numbers
+# at that size, so reports use a full Flash model instead. Fewer free requests
+# per day, but a report is an occasional thing.
+REPORT_MODEL = "gemini-3.6-flash"
 
 # Hard ceiling on how many trips to the API the agent may make for one question.
 MAX_STEPS = 8
@@ -64,6 +71,22 @@ def progress(mark):
         print(mark, end="", flush=True)
 
 
+def as_list(csv_paths):
+    """Accept either one path or several, and always hand back a list.
+
+    This lets Chat("sales.csv") and Chat(["a.csv", "b.csv"]) both work, so
+    adding comparison does not break the single file form.
+    """
+    if isinstance(csv_paths, str):
+        return [csv_paths]
+    return list(csv_paths)
+
+
+def summarize_all(csv_paths):
+    """Describe every file the agent is allowed to read, one after another."""
+    return "\n\n".join(summarize_csv(path) for path in as_list(csv_paths))
+
+
 def summarize_csv(csv_path):
     """Describe the CSV in a few lines: size, columns, types, and the first 5 rows.
 
@@ -80,7 +103,19 @@ def summarize_csv(csv_path):
 
     # df.dtypes pairs each column name with its data type.
     for column_name, dtype in df.dtypes.items():
-        lines.append(f"  - {column_name}: {dtype}")
+        line = f"  - {column_name}: {dtype}"
+
+        # For text columns with only a handful of values, list them all. This
+        # is how the model learns which categories exist without running code,
+        # and when comparing two files, which ones appeared or disappeared.
+        if str(dtype) in ("object", "str"):
+            values = df[column_name].unique()
+            if len(values) <= 15:
+                line += " -> " + ", ".join(sorted(str(v) for v in values))
+            else:
+                line += f" -> {len(values)} distinct values"
+
+        lines.append(line)
 
     lines.append("")
     lines.append("First 5 rows:")
@@ -96,7 +131,8 @@ file by writing small pieces of Python code and running them.
 Rules:
 - The run_python tool is the ONLY way you can see the data. Never guess a number.
 - Start your code with: import pandas as pd
-- Load the file with: df = pd.read_csv("{csv_path}")
+- Load a file with pd.read_csv and the exact path shown in the summaries
+  below, for example: df = pd.read_csv("{csv_path}")
 - Every snippet runs in a FRESH process. Variables do not carry over between calls,
   so reload the file each time.
 - Always print() what you want to see. Anything you do not print is lost.
@@ -204,7 +240,9 @@ several directions and record each thing you find as you go.
   leader that is declining is far more interesting than a leader.
 - Every headline must contain a real number, built with an f-string from a
   value you computed. The same rule as chart titles, for the same reason.
-- Give at least two of the findings a chart.
+- At least TWO of the findings MUST have a chart. This is not optional. Four
+  findings of plain text is not a report. Draw the chart first, save it, then
+  pass its path to add_finding as chart="charts/whatever.png".
 - Tidy any table before you pass it. Rename columns to readable labels, and
   format the numbers so a person can read them:
 
@@ -228,13 +266,45 @@ several directions and record each thing you find as you go.
 """
 
 
-DATA_SECTION = """Here is a summary of the file you are analyzing:
+COMPARE_RULES = """Comparing files:
+You have been given more than one file. The user wants to know what CHANGED
+between them, not what each one contains. Two sets of totals side by side is
+not a comparison - the reader should never have to do the subtraction.
+
+- Load both and give the variables names that say which is which:
+
+    old = pd.read_csv("sales.csv")
+    new = pd.read_csv("sales_2025.csv")
+
+- Report the difference and the percentage difference, not two separate totals.
+- Comparing is ALWAYS a two-pass job, the same as drawing a chart:
+    Call 1: for EVERY category column in the data - region, product, and any
+            others - print all of the following, for BOTH files:
+              * the total per category
+              * the trend within that file, from its first period to its last
+                period, as a percentage
+    Call 2: read those numbers and work out what actually changed.
+  Do not skip call 1. Do not stop at the first column where you find a change:
+  products changing does not excuse you from checking regions.
+- Then report what you found, in this order:
+    * any category whose trend CHANGED SIGN between the files. Growing 36% in
+      one file and falling 26% in the next is the largest kind of change there
+      is, even when the two yearly totals look nearly identical.
+    * categories present in one file but not the other, in BOTH directions.
+      Say added or discontinued, never a 100% fall or an infinite rise.
+    * the totals, and how far they moved.
+  Totals go LAST. They are the least interesting part of a comparison.
+"""
+
+
+DATA_SECTION = """Here are the files you can read:
 
 {summary}
 """
 
 
-def build_system_prompt(csv_path, report_mode=False):
+def build_system_prompt(csv_paths, report_mode=False):
+    paths = as_list(csv_paths)
     """Fill the CSV path and summary into the system prompt template."""
     # Only include the rules that apply. Report rules are long, and a small
     # model handles a short prompt better than a long one, so an ordinary
@@ -242,6 +312,8 @@ def build_system_prompt(csv_path, report_mode=False):
     sections = [BASE_RULES, CHART_RULES]
     if report_mode:
         sections.append(REPORT_RULES)
+    if len(paths) > 1:
+        sections.append(COMPARE_RULES)
     sections.append(DATA_SECTION)
 
     prompt = "\n".join(sections)
@@ -250,9 +322,9 @@ def build_system_prompt(csv_path, report_mode=False):
     # the prompt contains example code with { } braces in it, and .format()
     # would try to treat those as placeholders too.
     # The summary goes in last, so that braces inside the data are left alone.
-    prompt = prompt.replace("{csv_path}", csv_path)
+    prompt = prompt.replace("{csv_path}", paths[0])
     prompt = prompt.replace("{chart_dir}", CHART_DIR)
-    prompt = prompt.replace("{summary}", summarize_csv(csv_path))
+    prompt = prompt.replace("{summary}", summarize_all(paths))
     return prompt
 
 
@@ -296,14 +368,14 @@ def collect_text(parts):
     return "".join(part.text for part in parts if part.text)
 
 
-def call_model(client, conversation, config):
+def call_model(client, conversation, config, model):
     """Send the conversation to Gemini, retrying if the failure looks temporary."""
     wait = FIRST_RETRY_WAIT
 
     for attempt in range(1, MAX_ATTEMPTS + 1):
         try:
             return client.models.generate_content(
-                model=MODEL,
+                model=model,
                 contents=conversation,
                 config=config,
             )
@@ -338,12 +410,15 @@ class Chat:
     is what lets a follow-up question refer back to an earlier one.
     """
 
-    def __init__(self, csv_path="sales.csv", report_mode=False):
-        self.csv_path = csv_path
+    def __init__(self, csv_paths="sales.csv", report_mode=False):
+        self.csv_paths = as_list(csv_paths)
         self.report_mode = report_mode
 
         # Reports take many more steps than a single question does.
         self.max_steps = REPORT_MAX_STEPS if report_mode else MAX_STEPS
+
+        # A report is a much harder job, so it gets a stronger model.
+        self.model = REPORT_MODEL if report_mode else MODEL
 
         # Throw away findings left over from any earlier report.
         if report_mode:
@@ -358,7 +433,7 @@ class Chat:
         )
 
         self.config = types.GenerateContentConfig(
-            system_instruction=build_system_prompt(csv_path, report_mode),
+            system_instruction=build_system_prompt(self.csv_paths, report_mode),
             tools=[RUN_PYTHON_TOOL],
             # Turn OFF the SDK's automatic tool running. We drive the loop ourselves.
             automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
@@ -368,7 +443,8 @@ class Chat:
         # this entire list every turn. It keeps growing as the session goes on.
         self.conversation = []
 
-        log(f"Data file: {csv_path}")
+        log(f"Data files: {', '.join(self.csv_paths)}")
+        log(f"Model: {self.model}")
 
     def ask(self, question):
         """Answer one question, remembering everything asked before it."""
@@ -383,7 +459,9 @@ class Chat:
             log(f"--- Step {step} of {self.max_steps}: asking the model ---")
             progress(".")
 
-            response = call_model(self.client, self.conversation, self.config)
+            response = call_model(
+                self.client, self.conversation, self.config, self.model
+            )
 
             # A "candidate" is one possible reply. We asked for one, so take the first.
             reply = response.candidates[0].content
@@ -440,9 +518,9 @@ class Chat:
         )
 
 
-def ask(question, csv_path="sales.csv", report_mode=False):
+def ask(question, csv_paths="sales.csv", report_mode=False):
     """Answer a single question with no history. Behaves exactly as before."""
-    return Chat(csv_path, report_mode).ask(question)
+    return Chat(csv_paths, report_mode).ask(question)
 
 
 def indent(text):
@@ -462,12 +540,12 @@ def print_answer(answer):
         print(answer)
 
 
-def chat_loop(csv_path="sales.csv"):
+def chat_loop(csv_paths="sales.csv"):
     """Keep asking questions in one conversation until the user quits."""
-    chat = Chat(csv_path)
+    chat = Chat(csv_paths)
 
     print()
-    print(f"Chat mode. Ask about {csv_path}, or type 'quit' to leave.")
+    print(f"Chat mode. Ask about {', '.join(chat.csv_paths)}, or type 'quit' to leave.")
     print("Follow-up questions work - the agent remembers what you asked before.")
     print("Type 'reset' to start a fresh topic, or 'verbose' to see the steps.")
 
@@ -531,6 +609,24 @@ if __name__ == "__main__":
     if report_mode:
         arguments.remove("--report")
 
+    # --compare is followed by the two files to compare.
+    csv_paths = "sales.csv"
+    if "--compare" in arguments:
+        where = arguments.index("--compare")
+        csv_paths = arguments[where + 1:where + 3]
+
+        # Two arguments is not enough of a check: the question itself would
+        # otherwise be mistaken for the second file. Require .csv names.
+        looks_like_files = all(p.lower().endswith(".csv") for p in csv_paths)
+
+        if len(csv_paths) != 2 or not looks_like_files:
+            raise SystemExit(
+                "--compare needs two files, for example:\n"
+                '  python agent.py --compare sales.csv sales_2025.csv "what changed?"'
+            )
+        # Remove the flag and both paths, leaving just the question.
+        del arguments[where:where + 3]
+
     # Catch the predictable failures and turn them into one clear sentence,
     # instead of dumping a traceback on the user.
     try:
@@ -540,12 +636,15 @@ if __name__ == "__main__":
 
         if arguments:
             # A question was passed on the command line: answer it and exit.
-            print_answer(ask(arguments[0], report_mode=report_mode))
+            print_answer(ask(arguments[0], csv_paths, report_mode))
         else:
             # No question given: start an ongoing conversation instead.
-            chat_loop()
-    except FileNotFoundError:
-        raise SystemExit("sales.csv not found. Run 'python make_data.py' first.")
+            chat_loop(csv_paths)
+    except FileNotFoundError as error:
+        raise SystemExit(
+            f"File not found: {error.filename}\n"
+            "If you have not made the sample data yet, run: python make_data.py"
+        )
     except httpx.TimeoutException:
         raise SystemExit(
             "Gemini did not respond in time, even after retrying. "

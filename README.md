@@ -4,7 +4,8 @@ Ask questions about a CSV file in plain English. The agent writes pandas code,
 runs it, reads the output, fixes its own mistakes, and answers with real numbers.
 
 It also draws charts that point at the finding, rather than leaving you to
-spot it, and can write a whole report as a single self-contained HTML file.
+spot it, can write a whole report as a single self-contained HTML file, and can
+tell you what changed between two files.
 
 ```
 $ python agent.py "Which region grew fastest from January to December?"
@@ -205,6 +206,41 @@ base64-encoded into the page so the report is one file you can email.
 The report itself is `report.html` in the project folder. It is not committed -
 it is output, regenerated whenever you ask.
 
+### Comparing two files
+
+Give it two CSVs and it reports what changed, rather than describing each one:
+
+```bash
+python agent.py --compare sales.csv sales_2025.csv "What changed between these two years?"
+```
+
+```
+Regional monthly trends reversed sign: West rebounded to grow 74% across 2025
+while East fell 26%. The Doohickey product was discontinued and replaced by
+Gizmo, which generated $649,520. Total annual revenue rose 19.6%, from
+$2,145,804 to $2,567,092.
+```
+
+Comparison is a two-pass job, like charting. The agent first prints, for every
+category column in both files, the totals and the trend within each file - then
+reads those numbers and decides what changed.
+
+That first pass is the whole feature. The obvious comparison is between the
+totals, and the totals are where the important changes hide. In the sample data
+East is **+1.2% year over year**, the dullest number in the table, while inside
+those years it went from growing 36% to falling 26%. A comparison that reports
+"East was flat" is true and useless.
+
+So the agent is told to report, in this order: anything whose trend changed
+sign, then anything added or discontinued, then the totals. Totals go last
+because they are the least interesting part of a comparison.
+
+Combine it with `--report` for a comparison report:
+
+```bash
+python agent.py --compare sales.csv sales_2025.csv --report "What changed?"
+```
+
 ## Things it can do
 
 - **Aggregate**: totals, averages, counts, grouped any way you like
@@ -214,6 +250,8 @@ it is output, regenerated whenever you ask.
   with the series being discussed highlighted and the rest greyed out
 - **Report**: a self-contained HTML page of findings, charts and tables, from
   one broad question
+- **Compare**: what changed between two files - reversals, things added or
+  discontinued, and by how much
 - **Follow up**: "what about the East?" works, in chat mode
 - **Recover**: if its code crashes, it reads the error and tries again
 - **Refuse**: if the data cannot answer your question, it says so instead of
@@ -250,9 +288,10 @@ Nothing in the prompt or the tool is specific to sales data.
 | `agent.py` | The system prompt, tool definition, agent loop, and chat mode |
 | `tools.py` | Runs generated code in a subprocess with a timeout |
 | `report.py` | Collects findings, then renders them into one HTML file |
-| `make_data.py` | Generates the sample `sales.csv` |
+| `make_data.py` | Generates both sample CSVs |
 | `hello_gemini.py` | Minimal API call, to check your key works |
-| `sales.csv` | Sample data: 144 rows of fake regional sales |
+| `sales.csv` | Sample data: 144 rows of fake regional sales for 2024 |
+| `sales_2025.csv` | The year after, with changes to compare against |
 
 ## Configuration
 
@@ -260,7 +299,8 @@ The knobs are constants at the top of `agent.py`:
 
 | Setting | Default | Meaning |
 |---|---|---|
-| `MODEL` | `gemini-3.1-flash-lite` | Which Gemini model to use |
+| `MODEL` | `gemini-3.1-flash-lite` | Model for ordinary questions |
+| `REPORT_MODEL` | `gemini-3.6-flash` | Model for `--report`, which needs a stronger one |
 | `MAX_STEPS` | `8` | Most API calls allowed per question |
 | `REPORT_MAX_STEPS` | `22` | The same limit in `--report` mode, which needs far more |
 | `MAX_ATTEMPTS` | `4` | Retries on a temporary API failure |
@@ -283,6 +323,15 @@ model is busy - switch `MODEL` to another one.
 
 Models do get retired. If you get a `404`, check the
 [current model list](https://ai.google.dev/gemini-api/docs/models).
+
+**Why two models.** A report loads three sets of rules at once and the prompt
+passes 9,000 characters. At that size Flash-Lite began dropping the report
+procedure entirely and mis-stating figures - claiming a region went from -46%
+to +39% when the real values were -26% and +74%. Making the rules more
+emphatic made it worse, which is the signal that the problem is the volume of
+instructions rather than their wording. Reports use a full Flash model
+instead. Ordinary questions stay on Flash-Lite, which has a far larger free
+daily allowance and handles them perfectly well.
 
 ## Limitations
 
