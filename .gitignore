@@ -9,3 +9,7 @@ charts/
 # Editor and OS clutter
 .DS_Store
 .Rhistory
+
+# Generated reports
+report.html
+.report_draft.json

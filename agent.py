@@ -10,12 +10,17 @@ from dotenv import load_dotenv
 from google import genai
 from google.genai import errors, types
 
+import report
 from tools import run_python
 
 MODEL = "gemini-3.1-flash-lite"
 
 # Hard ceiling on how many trips to the API the agent may make for one question.
 MAX_STEPS = 8
+
+# A report needs far more: three to five findings, and every chart costs
+# two calls of its own.
+REPORT_MAX_STEPS = 22
 
 # Where the agent saves any charts it draws.
 CHART_DIR = "charts"
@@ -85,7 +90,7 @@ def summarize_csv(csv_path):
 
 
 # The standing instructions the model reads before every question.
-SYSTEM_PROMPT = """You are a careful data analyst. You answer questions about a CSV \
+BASE_RULES = """You are a careful data analyst. You answer questions about a CSV \
 file by writing small pieces of Python code and running them.
 
 Rules:
@@ -105,8 +110,10 @@ Rules:
   not in front of you, run code to get it.
 - If you drew a chart, your final answer must agree with the chart. Read the
   title you gave it before you write your answer.
+"""
 
-Charts:
+
+CHART_RULES = """Charts:
 - Only draw a chart if the question actually asks for one.
 - matplotlib is available. Import it as: import matplotlib.pyplot as plt
 - Save the picture into the {chart_dir} folder, for example:
@@ -167,20 +174,82 @@ Charts:
     plt.plot(x, west,  color="crimson",   linewidth=2.5, zorder=3, label="West")
     plt.plot(x, north, color="lightgrey", linewidth=1.2, zorder=1, label="North")
 - After saving, print the file path, then mention that path in your final answer.
+"""
 
-Here is a summary of the file you are analyzing:
+
+REPORT_RULES = """Reports:
+You are writing a short report, not answering one question. Explore the data in
+several directions and record each thing you find as you go.
+
+- The report module is already available. Record a finding like this:
+
+    import report
+    report.add_finding(
+        headline=f"South grew {growth:.0f}% over the year",
+        detail="It started as the smallest region and finished second.",
+        chart="charts/south_growth.png",
+        table=summary_df.to_html(index=False, border=0),
+    )
+
+  chart and table are both optional. headline and detail are not.
+- Record 4 or 5 findings, and make them different KINDS of fact rather than
+  four superlatives. Between them they must cover all three of these:
+    * how the totals changed over time, as a percentage
+    * the biggest mover in EACH direction: whatever grew fastest, and whatever
+      fell hardest. Rank by change, not by size. The fastest riser is often
+      small today and is the thing a reader most needs to know about.
+    * a breakdown across one of the categories in the data
+  Three "biggest X" facts is a weak report even when every number is right.
+- If something is both large and shrinking, say both in the SAME finding. A
+  leader that is declining is far more interesting than a leader.
+- Every headline must contain a real number, built with an f-string from a
+  value you computed. The same rule as chart titles, for the same reason.
+- Give at least two of the findings a chart.
+- Tidy any table before you pass it. Rename columns to readable labels, and
+  format the numbers so a person can read them:
+
+      table_df["Total revenue"] = table_df["Total revenue"].map("${:,.0f}".format)
+
+  "$434,973" belongs in a report. "434972.65" does not.
+- Each finding must say something different. Do not record the same fact twice
+  in different words.
+- When every finding is recorded, build the report in a final call:
+
+    import report
+    report.build(title="How the business performed in 2024", source="sales.csv")
+
+- Then reply in plain text: two sentences summarising what you found, and the
+  path to report.html.
+- That closing summary may ONLY repeat things you actually recorded as
+  findings. Do not introduce a new claim, a new cause or a new "driver" in it.
+  If you did not record it, do not say it.
+- Never call anything a driver of growth unless you computed its growth and
+  the number came out positive. Check the sign before you praise it.
+"""
+
+
+DATA_SECTION = """Here is a summary of the file you are analyzing:
 
 {summary}
 """
 
 
-def build_system_prompt(csv_path):
+def build_system_prompt(csv_path, report_mode=False):
     """Fill the CSV path and summary into the system prompt template."""
+    # Only include the rules that apply. Report rules are long, and a small
+    # model handles a short prompt better than a long one, so an ordinary
+    # question never has to carry them.
+    sections = [BASE_RULES, CHART_RULES]
+    if report_mode:
+        sections.append(REPORT_RULES)
+    sections.append(DATA_SECTION)
+
+    prompt = "\n".join(sections)
+
     # We fill the placeholders with .replace() rather than .format(), because
-    # the prompt now contains example code with { } braces in it, and .format()
+    # the prompt contains example code with { } braces in it, and .format()
     # would try to treat those as placeholders too.
     # The summary goes in last, so that braces inside the data are left alone.
-    prompt = SYSTEM_PROMPT
     prompt = prompt.replace("{csv_path}", csv_path)
     prompt = prompt.replace("{chart_dir}", CHART_DIR)
     prompt = prompt.replace("{summary}", summarize_csv(csv_path))
@@ -269,8 +338,16 @@ class Chat:
     is what lets a follow-up question refer back to an earlier one.
     """
 
-    def __init__(self, csv_path="sales.csv"):
+    def __init__(self, csv_path="sales.csv", report_mode=False):
         self.csv_path = csv_path
+        self.report_mode = report_mode
+
+        # Reports take many more steps than a single question does.
+        self.max_steps = REPORT_MAX_STEPS if report_mode else MAX_STEPS
+
+        # Throw away findings left over from any earlier report.
+        if report_mode:
+            report.clear()
 
         # Create the charts folder if it is not there yet. exist_ok means
         # "do nothing if it already exists" rather than raising an error.
@@ -281,7 +358,7 @@ class Chat:
         )
 
         self.config = types.GenerateContentConfig(
-            system_instruction=build_system_prompt(csv_path),
+            system_instruction=build_system_prompt(csv_path, report_mode),
             tools=[RUN_PYTHON_TOOL],
             # Turn OFF the SDK's automatic tool running. We drive the loop ourselves.
             automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
@@ -302,8 +379,8 @@ class Chat:
         log(f"Question: {question}")
         progress("Analyzing")
 
-        for step in range(1, MAX_STEPS + 1):
-            log(f"--- Step {step} of {MAX_STEPS}: asking the model ---")
+        for step in range(1, self.max_steps + 1):
+            log(f"--- Step {step} of {self.max_steps}: asking the model ---")
             progress(".")
 
             response = call_model(self.client, self.conversation, self.config)
@@ -358,14 +435,14 @@ class Chat:
         log("Step limit reached.")
         progress("\n")
         return (
-            f"Stopped after {MAX_STEPS} steps without reaching an answer. "
+            f"Stopped after {self.max_steps} steps without reaching an answer. "
             "Try asking a simpler or more specific question."
         )
 
 
-def ask(question, csv_path="sales.csv"):
+def ask(question, csv_path="sales.csv", report_mode=False):
     """Answer a single question with no history. Behaves exactly as before."""
-    return Chat(csv_path).ask(question)
+    return Chat(csv_path, report_mode).ask(question)
 
 
 def indent(text):
@@ -450,12 +527,20 @@ if __name__ == "__main__":
             arguments.remove(flag)
             set_verbose(True)
 
+    report_mode = "--report" in arguments
+    if report_mode:
+        arguments.remove("--report")
+
     # Catch the predictable failures and turn them into one clear sentence,
     # instead of dumping a traceback on the user.
     try:
+        if report_mode and not arguments:
+            raise SystemExit('--report needs a question, for example:\n'
+                             '  python agent.py --report "How did 2024 go?"')
+
         if arguments:
             # A question was passed on the command line: answer it and exit.
-            print_answer(ask(arguments[0]))
+            print_answer(ask(arguments[0], report_mode=report_mode))
         else:
             # No question given: start an ongoing conversation instead.
             chat_loop()

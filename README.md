@@ -4,7 +4,7 @@ Ask questions about a CSV file in plain English. The agent writes pandas code,
 runs it, reads the output, fixes its own mistakes, and answers with real numbers.
 
 It also draws charts that point at the finding, rather than leaving you to
-spot it.
+spot it, and can write a whole report as a single self-contained HTML file.
 
 ```
 $ python agent.py "Which region grew fastest from January to December?"
@@ -176,6 +176,35 @@ word itself comes from the sign of a subtraction.
 python agent.py "Draw a line chart of monthly revenue for each region"
 ```
 
+### Reports
+
+Give it a broad question and `--report`, and instead of one answer you get
+`report.html` - a self-contained page with several findings, charts and tables:
+
+```bash
+python agent.py --report "How did the business perform in 2024?"
+```
+
+![The top of a generated report. The heading reads "How the business performed
+in 2024", with a source line naming sales.csv and the date. Below it a finding
+titled "Total revenue grew 15.8% over the year" and a line chart of monthly
+revenue.](docs/example-report.png)
+
+The agent works through the data in several directions and records each finding
+as it goes. It is required to cover the change over time, the biggest mover in
+each direction, and a breakdown by category - so a report cannot just be four
+"biggest X" facts. Ranking by change rather than size is the rule that matters
+most: the fastest riser is usually small today, which is exactly why ranking by
+size hides it.
+
+Findings accumulate in a small JSON file as they are discovered, because each
+piece of generated code runs in a fresh process and nothing survives in memory
+between steps. A final step renders that file into HTML, with the charts
+base64-encoded into the page so the report is one file you can email.
+
+The report itself is `report.html` in the project folder. It is not committed -
+it is output, regenerated whenever you ask.
+
 ## Things it can do
 
 - **Aggregate**: totals, averages, counts, grouped any way you like
@@ -183,6 +212,8 @@ python agent.py "Draw a line chart of monthly revenue for each region"
 - **Filter**: any slice of the data, described in words
 - **Chart**: annotated bar, line and scatter charts - titled with the finding,
   with the series being discussed highlighted and the rest greyed out
+- **Report**: a self-contained HTML page of findings, charts and tables, from
+  one broad question
 - **Follow up**: "what about the East?" works, in chat mode
 - **Recover**: if its code crashes, it reads the error and tries again
 - **Refuse**: if the data cannot answer your question, it says so instead of
@@ -218,6 +249,7 @@ Nothing in the prompt or the tool is specific to sales data.
 |---|---|
 | `agent.py` | The system prompt, tool definition, agent loop, and chat mode |
 | `tools.py` | Runs generated code in a subprocess with a timeout |
+| `report.py` | Collects findings, then renders them into one HTML file |
 | `make_data.py` | Generates the sample `sales.csv` |
 | `hello_gemini.py` | Minimal API call, to check your key works |
 | `sales.csv` | Sample data: 144 rows of fake regional sales |
@@ -230,6 +262,7 @@ The knobs are constants at the top of `agent.py`:
 |---|---|---|
 | `MODEL` | `gemini-3.1-flash-lite` | Which Gemini model to use |
 | `MAX_STEPS` | `8` | Most API calls allowed per question |
+| `REPORT_MAX_STEPS` | `22` | The same limit in `--report` mode, which needs far more |
 | `MAX_ATTEMPTS` | `4` | Retries on a temporary API failure |
 | `REQUEST_TIMEOUT_MS` | `60000` | How long to wait for Gemini |
 | `CHART_DIR` | `charts` | Where charts are saved |
