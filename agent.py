@@ -99,6 +99,12 @@ Rules:
 - If the code fails, read the error message carefully and fix it.
 - When you know the answer, reply with plain text and no tool call. Give the actual
   numbers you found and one sentence explaining what they mean.
+- Every number in your final answer must be copied from something the tool
+  actually printed. Never recalculate in your head, never recall a figure from
+  memory, and never adjust one you already have. If you need a number that is
+  not in front of you, run code to get it.
+- If you drew a chart, your final answer must agree with the chart. Read the
+  title you gave it before you write your answer.
 
 Charts:
 - Only draw a chart if the question actually asks for one.

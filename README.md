@@ -37,6 +37,13 @@ The total revenue across all regions, products, and months is 2,145,803.62.
 `-v` is worth using whenever an answer looks surprising. The agent sometimes
 takes a wrong turn and corrects itself, and the only way to know is to look.
 
+Ask for a chart and you get one that makes its point:
+
+![A line chart of monthly revenue by region. The title reads "West region
+revenue fell 26% over the year". The West line is highlighted in red while the
+other three regions are greyed out, and an arrow points at December with the
+label "Fell from 61,574 in January to 45,817 in December".](docs/example-chart.png)
+
 ## How it works
 
 The agent never guesses a number. It can only learn about your data by running
@@ -146,8 +153,24 @@ title states the finding rather than describing the axes, the series being
 discussed is highlighted while the rest fade to grey, and an arrow points at
 the thing being claimed.
 
-Every number printed on a chart is computed from the data in the same snippet
-that draws it - never written by the model from memory.
+This takes two passes. The agent first runs code to print the numbers, looks
+at them, and only then draws - because you cannot title a chart with its
+finding before you know what the finding is.
+
+Every number shown on a chart is built with an f-string from a value computed
+in the same snippet, and direction words come from the sign of the change:
+
+```python
+direction = "rose" if change > 0 else "fell"
+title = f"West revenue {direction} {abs(change):.0f}% over the year"
+```
+
+That matters more than it looks. An earlier version let the model write labels
+freehand, and it produced "West revenue ends the year with a strong recovery"
+over a line that had fallen 26%. The chart was plotted correctly from the data;
+only the sentence on top of it was invented. Numbers that are computed cannot
+be wrong in that way, and a falling line cannot be called a recovery when the
+word itself comes from the sign of a subtraction.
 
 ```bash
 python agent.py "Draw a line chart of monthly revenue for each region"
@@ -158,7 +181,8 @@ python agent.py "Draw a line chart of monthly revenue for each region"
 - **Aggregate**: totals, averages, counts, grouped any way you like
 - **Compare**: growth rates, rankings, period over period changes
 - **Filter**: any slice of the data, described in words
-- **Chart**: bar, line, scatter, anything matplotlib can draw
+- **Chart**: annotated bar, line and scatter charts - titled with the finding,
+  with the series being discussed highlighted and the rest greyed out
 - **Follow up**: "what about the East?" works, in chat mode
 - **Recover**: if its code crashes, it reads the error and tries again
 - **Refuse**: if the data cannot answer your question, it says so instead of
